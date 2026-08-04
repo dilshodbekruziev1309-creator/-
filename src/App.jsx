@@ -1323,13 +1323,18 @@ function RawMaterialsSection({ rawMaterials, rawMaterialBatches, productionBatch
           const batches = rawMaterialBatches.filter((b) => b.raw_material_id === m.id).sort((a, b) => new Date(a.date) - new Date(b.date));
           const totalRemaining = totalsAsOfToday.find((r) => r.material.id === m.id)?.closing ?? 0;
           const activeRemaining = batches.filter((b) => b.active).reduce((s, b) => s + Number(b.remaining_qty), 0);
+          const totalValue = batches.reduce((s, b) => s + Number(b.remaining_qty) * Number(b.unit_cost), 0);
+          const avgPrice = totalRemaining !== 0 ? totalValue / totalRemaining : 0;
           if (batches.length === 0) return null;
           const isOpen = !!expandedMaterials[m.id];
           return (
             <div key={m.id} style={{ marginBottom: 10 }}>
               <div className="card-title-row clickable-row" style={{ marginBottom: isOpen ? 6 : 0, padding: "6px 4px" }} onClick={() => toggleMaterial(m.id)}>
                 <b>{isOpen ? "▾" : "▸"} {m.name} <span className="muted" style={{ fontWeight: 400 }}>({batches.length} partiya)</span></b>
-                <span className="muted">Umumiy qoldiq: <span className={`mono ${totalRemaining < 0 ? "tone-debt-text" : ""}`}>{fmtQty(totalRemaining)} {m.unit}</span>
+                <span className="muted">
+                  Umumiy qoldiq: <span className={`mono ${totalRemaining < 0 ? "tone-debt-text" : ""}`}>{fmtQty(totalRemaining)} {m.unit}</span>
+                  {" · "}O'rtacha narx: <span className="mono">{fmt(avgPrice)}</span>
+                  {" · "}Summasi: <span className="mono">{fmt(totalValue)}</span>
                   {activeRemaining !== totalRemaining && <span style={{ fontSize: 11 }}> (shundan faol: {fmtQty(activeRemaining)} {m.unit})</span>}
                 </span>
               </div>
@@ -2275,9 +2280,19 @@ function InvoiceTab({ products, customers, invoices, currentUser, onReload, onPr
     }
   };
 
-  const removeInvoice = async (id) => {
-    if (!confirm("Bu fakturani o'chirasizmi? (Ombor qoldig'i qaytarilmaydi)")) return;
-    await api.invoices.remove(id);
+  const removeInvoice = async (invoice) => {
+    if (!confirm("Bu fakturani o'chirasizmi? Ombor qoldig'i avtomatik qaytariladi va mijoz qarzidan ayiriladi.")) return;
+    for (const it of invoice.items || []) {
+      if (!it.product_id) continue;
+      const p = products.find((x) => x.id === it.product_id);
+      if (p) {
+        await api.products.update(p.id, { qty: Number(p.qty) + Number(it.qty) });
+        await api.stockMovements.add({ product_id: p.id, date: todayISO(), qty: Number(it.qty), type: "tuzatish", note: `Faktura ${invoice.number} o'chirildi` });
+      }
+    }
+    const linkedCommission = invoices.find((i) => i.number === `${invoice.number}-K`);
+    if (linkedCommission) await api.invoices.remove(linkedCommission.id);
+    await api.invoices.remove(invoice.id);
     await onReload();
   };
 
@@ -2357,11 +2372,27 @@ function InvoiceTab({ products, customers, invoices, currentUser, onReload, onPr
       </div>
 
       <div className="card">
-        <div className="card-title">Chiqarilgan fakturalar ({invoices.length})</div>
+        <div className="card-title-row">
+          <div className="card-title">Chiqarilgan fakturalar ({filteredInvoices.length}{filteredInvoices.length !== invoices.length ? ` / ${invoices.length}` : ""})</div>
+        </div>
+        <div className="form-row wrap" style={{ marginBottom: 12 }}>
+          <select className="input" value={filterCustomer} onChange={(e) => setFilterCustomer(e.target.value)}>
+            <option value="">— Barcha mijozlar —</option>
+            {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <input className="input" placeholder="Faktura raqami bo'yicha qidirish" value={filterNumber} onChange={(e) => setFilterNumber(e.target.value)} />
+          <label className="muted" style={{ fontSize: 12.5 }}>Dan:</label>
+          <input className="input xs" type="date" value={filterFrom} onChange={(e) => setFilterFrom(e.target.value)} />
+          <label className="muted" style={{ fontSize: 12.5 }}>Gacha:</label>
+          <input className="input xs" type="date" value={filterTo} onChange={(e) => setFilterTo(e.target.value)} />
+          {(filterCustomer || filterNumber || filterFrom || filterTo) && (
+            <button className="btn btn-ghost" onClick={() => { setFilterCustomer(""); setFilterNumber(""); setFilterFrom(""); setFilterTo(""); }}>Tozalash</button>
+          )}
+        </div>
         <table className="table">
           <thead><tr><th>№</th><th>Sana</th><th>Mijoz</th><th className="right">Summa</th><th>Kim kiritdi</th><th></th></tr></thead>
           <tbody>
-            {[...invoices].reverse().map((inv) => (
+            {[...filteredInvoices].reverse().map((inv) => (
               <tr key={inv.id}>
                 <td className="mono">{inv.number}</td>
                 <td className="muted">{fmtDate(inv.date)}</td>
@@ -2371,11 +2402,11 @@ function InvoiceTab({ products, customers, invoices, currentUser, onReload, onPr
                 <td className="row-actions">
                   <button className="icon-btn" onClick={() => onPrint(inv)}><Printer size={14} /></button>
                   {!inv.number.endsWith("-K") && <button className="icon-btn" onClick={() => startEditInvoice(inv)}><Pencil size={14} /></button>}
-                  <button className="icon-btn danger" onClick={() => removeInvoice(inv.id)}><Trash2 size={14} /></button>
+                  <button className="icon-btn danger" onClick={() => removeInvoice(inv)}><Trash2 size={14} /></button>
                 </td>
               </tr>
             ))}
-            {invoices.length === 0 && <tr><td colSpan={6} className="empty">Hali faktura chiqarilmagan</td></tr>}
+            {filteredInvoices.length === 0 && <tr><td colSpan={6} className="empty">Faktura topilmadi</td></tr>}
           </tbody>
         </table>
       </div>
